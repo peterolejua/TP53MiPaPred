@@ -1,0 +1,892 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Librerías
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(splitstackshape)
+library(reshape2)
+library(ggplot2)
+```
+
+
+# Directories creation
+
+```{r, directories}
+if (!file.exists("0_RawData")){
+  dir.create("0_RawData")
+}
+
+if (!file.exists("0_RawData/UMD")){
+  dir.create("0_RawData/UMD")
+}
+
+if (!file.exists("0_RawData/dbNSFP4.0b1a")){
+  dir.create("0_RawData/dbNSFP4.0b1a")
+}
+
+if (!file.exists("1_processed_data")){
+  dir.create("1_processed_data")
+}
+```
+
+# Getting the raw data
+
+## UMD tp53
+
+```{r, umd data}
+fileUrl <- "https://p53.fr/images/Database/Read_me_2017_2.0_mutations.docx.zip"
+destFile <- "./0_RawData/UMD/readme.zip"
+if (!file.exists(destFile)){
+  download.file(fileUrl, destFile, method = "curl")
+}
+
+fileUrl <- "https://p53.fr/images/Database/UMD_mutations_US.tsv.zip"
+destFile <- "./0_RawData/UMD/mutaciones.zip"
+if (!file.exists(destFile)){
+  download.file(fileUrl, destFile, method = "curl")
+}
+(umd_tp53_downloaded <- date())
+```
+
+```{r, unzip}
+unzip("0_RawData/UMD/mutaciones.zip", list=T)
+unzip("0_RawData/UMD/mutaciones.zip", exdir = "0_RawData/UMD",overwrite = F,
+      files=c("UMD_mutations_US.tsv"))
+
+unzip("0_RawData/UMD/readme.zip", list=T)
+unzip("0_RawData/UMD/readme.zip", exdir = "0_RawData/UMD",overwrite = F,
+      files=c("Read_me 2017_2.0_mutations.docx"))
+```
+
+## dbNSFP4.0b1a from googledrive
+
+```{r, dbnsfp}
+library(googledrive)
+
+temp <- tempfile(pattern = "dbNSFP4.0b1a", 
+                 tmpdir= "./0_RawData/dbNSFP4.0b1a/",
+                 fileext = ".zip")
+
+dl <- drive_download(
+  as_id("1f5rGxefu8WFJYuOkKP5Gy0pJCw1Shgxa"), path = temp, overwrite = F)
+
+
+(dbNSFP4.0b1a_downloaded <- date())
+```
+
+```{r, unzip2}
+unzip(temp, list=T)
+unzip(temp, exdir = "0_RawData/dbNSFP4.0b1a",overwrite = F,
+      files=c("dbNSFP4.0b1a.readme.txt",
+              "dbNSFP4.0b1a_variant.chr17.gz",
+              "dbNSFP4.0b1_gene.gz",
+              "search_dbNSFP40b1a.class",
+              "search_dbNSFP40b1a.java",
+              "search_dbNSFP40b1a.readme.pdf",
+              "tryhg38.in"))
+
+
+```
+
+# Reading variants
+
+```{r, variants}
+mutations <- read.delim("0_RawData/UMD/UMD_mutations_US.tsv", stringsAsFactors=FALSE)
+# str(mutations)
+
+mutations %>% 
+  pull(cDNA_variant) %>% 
+  n_distinct()
+```
+
+# Filtering missense mutations
+
+```{r}
+unique(mutations$Variant_Classification)
+table(mutations$Variant_Classification, mutations$Variant_Type)
+table(mutations$Mutation_Type, mutations$Variant_Type)
+```
+
+```{r}
+mutations %>% 
+  select(cDNA_variant,Variant_Classification) %>% 
+  filter(grepl("missense", Variant_Classification, ignore.case = T)) %>% 
+  n_distinct()
+
+mutations %>% 
+  select(cDNA_variant,Variant_Classification,Variant_Type) %>% 
+  filter(grepl("missense", Variant_Classification, ignore.case = T)) %>% 
+  distinct() %>% 
+  pull(Variant_Type) %>% 
+  table()
+
+```
+
+
+from the SESHAT documentation
+
+SNV: Single Nucleotide Variant
+DNP: Change in **two** consecutive bases (dinucleotide variant)
+TNP: Change in three consecutive bases (tri-nucleotide variant)
+ONP: Change in four or more consecutive bases (oligo-nucleotide variant)
+INS: Insertion
+DEL: Deletion
+
+
+```{r}
+misMut <- filter(
+  mutations, 
+  grepl("missense", Variant_Classification, ignore.case = T) & 
+    Variant_Type=="SNP"
+  )
+dim(misMut)
+```
+
+```{r}
+misMut %>% 
+  mutate(aminoacid_change = WT_AA_1 != Mutant_AA_1) %>% 
+  select(aminoacid_change, Variant_Classification) %>% 
+  table()
+```
+
+```{r}
+misMut %>% 
+  mutate(aminoacid_change = WT_AA_1 != Mutant_AA_1) %>% 
+  filter(!aminoacid_change) %>% View()
+```
+
+Si no cambia el aminoacido no es missense
+
+# Transformation of coordinates to GRCH38
+
+## Export to csv for using mutalyzer
+
+```{r}
+
+misMut %>% 
+  select(cDNA_variant, WT_AA_1, Mutant_AA_1) %>%
+  unique() %>% 
+  mutate(cDNA_variant=paste0("NM_000546.5:",cDNA_variant)) ->
+  mis_variants
+
+write.table(x = mis_variants$cDNA_variant, 
+            file = "0_RawData/UMD/cDNA_variant.csv",
+            row.names = F, col.names = F)
+```
+
+## Using mutalyzer
+
+- Now upload `cDNA_variant.csv` to mutalyzer: Run for hg19 and hg38
+    
+- The output is a batch job file used later merging with dbnsfp.
+
+## Import batch file
+
+```{r}
+batch_hg19 <- read_table2("0_RawData/UMD/batch-job-hg19.txt",skip = 1,col_names = F)
+
+batch_hg38 <- read_table2("0_RawData/UMD/batch-job-hg38.txt",skip = 1,col_names = F)
+
+batch_hg19 %>%
+  rename(cDNA_variant = X1,
+         HG19_variant = X2) %>% 
+  select(cDNA_variant, 
+         HG19_variant) -> batch_hg19
+
+batch_hg38 %>%
+  rename(cDNA_variant = X1,
+         HG38_variant = X2) %>% 
+  select(cDNA_variant, 
+         HG38_variant) -> batch_hg38
+
+batch_hg19 %>% 
+  inner_join(batch_hg38) -> batch
+
+View(batch)
+```
+
+## Preparation for merging dnsfp
+
+```{r}
+
+batch %>% 
+  mutate(position_mutation=gsub("NC_000017.11:g.","",HG38_variant)) %>%
+  separate(col = position_mutation, 
+           into = c("position","mutation"),
+           sep = c(7)) %>% 
+  separate(col = mutation, 
+           into = c("ref","alt"),
+           sep = ">") %>% 
+  mutate(chromosome=17, 
+         refAA= mis_variants$WT_AA_1, altAA= mis_variants$Mutant_AA_1) ->
+  tp53gch38
+```
+
+## input for dbnsfp
+
+```{r}
+tp53gch38 %>% 
+  select(chromosome,position:altAA) %>% 
+write.table("0_RawData/dbNSFP4.0b1a/umd_missense_gch38.in",row.names = F, col.names = F,sep = "\t",quote = F)
+```
+
+
+
+
+# Search for scores with search_dbNSFP40b1a
+
+First copy the necessary files with the following code to a folder where you can run java.
+
+uncomment and change directory
+
+```{r}
+# file.copy(from="0_RawData/dbNSFP4.0b1a/dbNSFP4.0b1a_variant.chr17.gz", to="C:/Users/paolejua")
+# file.copy("0_RawData/dbNSFP4.0b1a/dbNSFP4.0b1_gene.gz", to="C:/Users/paolejua")
+# file.copy("0_RawData/dbNSFP4.0b1a/search_dbNSFP40b1a.class", to="C:/Users/paolejua")
+# file.copy("0_RawData/dbNSFP4.0b1a/search_dbNSFP40b1a.java", to="C:/Users/paolejua")
+# file.copy("0_RawData/dbNSFP4.0b1a/umd_missense_gch38.in", to="C:/Users/paolejua")
+```
+
+## Run search_dbNSFP40b1a
+
+The following didn´t work from R. It had to be done from console. Copy and paste the code without system("").
+
+```{r}
+wd <- getwd()
+setwd(dir = "0_RawData/dbNSFP4.0b1a/")
+```
+
+```{r}
+system("java search_dbNSFP40b1a -i umd_missense_gch38.in -o umd_missense_gch38.out -c 17")
+
+system('chdir')
+system('cd 0_RawData/dbNSFP4.0b1a/; java -version')
+
+system('cd 0_RawData/dbNSFP4.0b1a/; java 
+       search_dbNSFP40b1a -i umd_missense_gch38.in -o umd_missense_gch38.out -c 17')
+system("dir")
+
+```
+
+there were two errors
+
+## Errors merging
+
+### First
+```{r}
+tp53gch38 %>% 
+  filter(position=="7673240" & ref== "G" & alt=="A" & refAA=="Y" & altAA=="Y") %>% 
+  select(cDNA_variant:altAA) %>% 
+  View()
+
+misMut %>% 
+  filter(cDNA_variant=="c.993+295C>T") %>% 
+View()
+```
+
+the aminoacid does not change therefore it should be a synonymous mutation.
+
+
+### Second
+
+```{r}
+tp53gch38 %>% 
+  filter(position=="7674894" & ref== "G" & alt=="A" & refAA=="R" & altAA=="W") %>% 
+  select(cDNA_variant:altAA) %>% 
+  View()
+
+misMut %>% 
+  filter(cDNA_variant=="c.637C>T") %>% 
+  View()
+```
+
+this is a nonsense mutation (wrong classification in UMD)
+
+https://www.ncbi.nlm.nih.gov/clinvar/variation/43590/
+
+https://www.ncbi.nlm.nih.gov/snp/rs397516436
+
+http://www.sequenceontology.org/browser/current_svn/term/SO:0001587
+
+https://cancer.sanger.ac.uk/cosmic/mutation/overview?id=10654
+
+## Transcript to use
+
+ENST00000269305 corresponds to NM_000546.5
+
+https://www.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000141510;r=17:7668402-7687538;t=ENST00000269305
+
+
+
+
+# Covariables split; to long format; and then filter by ENST00000269305
+
+```{r}
+scores <- read.delim("0_RawData/dbNSFP4.0b1a/umd_missense_gch38.out", stringsAsFactors=FALSE)
+
+# names(scores)
+
+scores %>% 
+  mutate(HG38_variant = paste0("NC_000017.11:g.", 
+                               pos.1.coor.,
+                               ref,
+                               ">",
+                               alt)) -> scores
+
+
+```
+
+
+```{r}
+scores %>% 
+  select(HG38_variant,
+         position = pos.1.coor.,ref,alt,
+         aaref,aaalt, # identificadores
+         Ensembl_transcriptid, Ensembl_proteinid, # identificador de la transcripción
+         SIFT_score,
+         FATHMM_score,
+         PROVEAN_score,
+         VEST4_score
+         ) %>%
+  cSplit(c('Ensembl_transcriptid',
+           'Ensembl_proteinid',
+           'SIFT_score',
+           'FATHMM_score',
+           'PROVEAN_score',
+           'VEST4_score'
+           ), 
+         sep=";",drop = T,type.convert = F,direction = "long") %>% 
+  filter(Ensembl_transcriptid=="ENST00000269305") -> scores_transc_id 
+  
+scores %>% 
+  select(HG38_variant,aaref,aaalt, # identificadores
+         Uniprot_acc, # identificador de la transcripción
+         Polyphen2_HDIV_score,
+         Polyphen2_HVAR_score
+         ) %>% 
+  cSplit(c('Uniprot_acc',
+           'Polyphen2_HDIV_score',
+           'Polyphen2_HVAR_score'
+           ), 
+         sep=";",drop = T,type.convert = F,direction = "long") %>% 
+  filter(Uniprot_acc=="P04637") %>% unique() -> scores_poly
+
+scores %>% 
+  select(HG38_variant,aaref,aaalt, # identificadores
+         Uniprot_entry, # identificador de la transcripción
+         MutationAssessor_score
+         ) %>% 
+  cSplit(c('Uniprot_entry',
+           'MutationAssessor_score'
+           ), 
+         sep=";",drop = T,type.convert = F,direction = "long") %>% 
+  filter(Uniprot_entry=="P53_HUMAN") %>% unique() -> scores_mutassessor 
+
+scores %>% 
+  select(HG38_variant,aaref,aaalt, # identificadores
+         LRT_score,
+         fathmm.MKL_coding_score,
+         fathmm.XF_coding_score,
+         MutPred_score,
+         PrimateAI_score,
+         integrated_fitCons_score,
+         GM12878_fitCons_score,
+         H1.hESC_fitCons_score,
+         HUVEC_fitCons_score,
+         GERP.._RS,
+         phyloP100way_vertebrate,
+         phyloP30way_mammalian,
+         phyloP17way_primate,
+         phastCons100way_vertebrate,
+         phastCons30way_mammalian,
+         phastCons17way_primate,
+         X29way_logOdds,
+         bStatistic,
+         REVEL_score
+         ) -> scores_undivided
+
+
+
+```
+
+
+```{r}
+scores_transc_id %>% 
+  full_join(y=scores_poly, 
+          by=c("HG38_variant","aaref","aaalt")) %>%
+  full_join(y=scores_mutassessor, 
+          by=c("HG38_variant","aaref","aaalt")) %>%
+  full_join(y=scores_undivided, 
+          by=c("HG38_variant","aaref","aaalt")) -> scores_final
+```
+
+# Chequeo de scores vs UMD
+
+```{r}
+misMut %>% 
+  select(cDNA_variant,
+         Codon:Mutant_AA_3,
+         Sift.Score:Confident__Hypotheses, # retrieve umd scores
+         Pathogenicity) %>% 
+  mutate(cDNA_variant=paste0("NM_000546.5:",cDNA_variant)) %>% 
+  unique() -> 
+  mis_variants
+```
+
+
+
+```{r}
+batch %>% 
+  inner_join(scores_final,"HG38_variant") %>% 
+  inner_join(y=mis_variants, 
+          by="cDNA_variant") -> data
+
+data %>% 
+  select(cDNA_variant:Ensembl_proteinid,
+         Uniprot_acc, Uniprot_entry,
+         Codon:Mutant_AA_3,
+         everything()) %>%  
+  mutate_at(vars(SIFT_score:REVEL_score), 
+            as.numeric) %>%
+  mutate_at(vars(Sift.Score,
+                 Provean_Score,
+                 Mutassessor_score,
+                 MutPred_Splice_General_Score), 
+            as.numeric) %>%
+  mutate_at(vars(aaref:Uniprot_entry), 
+            factor) %>% 
+  mutate_at(vars(Sift.Prediction,
+                 Provean_prediction,
+                 Mutassessor_prediction.,
+                 Polyphen,
+                 Condel,
+                 Pathogenicity), 
+            factor) -> data
+
+
+# summary(data)
+```
+
+
+
+
+
+
+## Sift ok
+
+```{r}
+data %>% 
+  ggplot(aes(SIFT_score,y=Sift.Score))+
+  geom_point()
+
+with(data,
+sum(SIFT_score!=Sift.Score)
+)
+
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Sift.Score,
+         SIFT_score) %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>%
+  View()
+```
+
+## Provean_Score ok
+
+```{r}
+data %>% 
+  ggplot(aes(Provean_Score,y=PROVEAN_score))+
+  geom_point()
+
+with(data,
+sum(as.numeric(Provean_Score)!=as.numeric(PROVEAN_score))
+)
+
+data %>% 
+  select(cDNA_variant,
+         HG38_variant, 
+         Ensembl_transcriptid,
+         Provean_Score,
+         PROVEAN_score) %>% 
+  filter(is.na(Provean_Score) | is.na(PROVEAN_score)) %>% 
+  View()
+
+
+data %>% 
+  select(cDNA_variant,
+         HG38_variant, 
+         Ensembl_transcriptid,
+         Provean_Score,
+         PROVEAN_score) %>% 
+  mutate(diferencia = Provean_Score - PROVEAN_score) %>% 
+  summary()
+```
+
+## Mutassessor_score
+
+```{r}
+data %>% 
+  select(Mutassessor_score,MutationAssessor_score) %>% 
+  apply(2 , as.numeric)%>%
+  plot()
+```
+
+```{r}
+data %>%
+  select(Uniprot_entry,
+         MutationAssessor_score,
+         Codon:Mutant_AA_1) %>% 
+  mutate(umd_variant=paste0(WT_AA_1,Codon,Mutant_AA_1)) -> temp
+
+temp %>% 
+  select(Uniprot_entry) %>% 
+  table(useNA = "ifany")
+
+# temp %>% 
+#   mutate(variant.not.equal = MutationAssessor_variant!=umd_variant) %>%
+#   pull(variant.not.equal) %>% 
+#   sum(na.rm = T)
+
+data %>% 
+  select(HG38_variant:Mutant_AA_3, Mutassessor_score, # hg38 score UMD
+         MutationAssessor_score # score dbnsfp35a
+         ) %>% 
+filter(Mutassessor_score != MutationAssessor_score) %>% 
+  View()
+```
+
+Incluso usando la tripleta WT_AA_1,Codon,Mutant_AA_1 obtendríamos el valor de dbnsfp35a. Ejemplo, 
+
+Ir a
+
+http://mutationassessor.org/r3/
+
+y usar
+
+hg38,17,7674181,C,T
+
+
+## MutPred_Splice_General_Score  this other stuff...
+
+```{r}
+data %>% 
+  select(MutPred_score,MutPred_Splice_General_Score) %>% 
+  apply(2 , as.numeric)%>%
+  plot()
+
+```
+
+we will use MutPred_score
+
+
+# Missings
+
+## Aquellas variables que no requieren división
+```{r}
+scores %>% 
+  
+  select(position:aaalt, # identificadores
+         Ensembl_transcriptid, Ensembl_proteinid, Uniprot_acc, Uniprot_entry, # identificador de la transcripción
+         LRT_score,
+         fathmm.MKL_coding_score,
+         fathmm.XF_coding_score,
+         MutPred_score,
+         PrimateAI_score,
+         integrated_fitCons_score,
+         GM12878_fitCons_score,
+         H1.hESC_fitCons_score,
+         HUVEC_fitCons_score,
+         GERP.._RS,
+         phyloP100way_vertebrate,
+         phyloP30way_mammalian,
+         phyloP17way_primate,
+         phastCons100way_vertebrate,
+         phastCons30way_mammalian,
+         phastCons17way_primate,
+         X29way_logOdds,
+         bStatistic,
+         REVEL_score
+         ) %>% 
+  mutate_at(vars(LRT_score:REVEL_score),as.numeric) %>% 
+  summary()
+```
+
+## LRT_score
+
+```{r}
+scores %>% 
+  select(LRT_score) %>% 
+  mutate(score_numeric = as.numeric(LRT_score)) %>% 
+  filter(is.na(score_numeric)) %>% 
+  View()
+```
+
+## MutPred_score
+
+```{r}
+scores %>% 
+  select(MutPred_score) %>% 
+  mutate(score_numeric = as.numeric(MutPred_score)) %>% 
+  filter(is.na(score_numeric)) %>% 
+  View()
+```
+
+
+## PrimateAI_score
+
+```{r}
+scores %>% 
+  select(PrimateAI_score) %>% 
+  mutate(score_numeric = as.numeric(PrimateAI_score)) %>% 
+  filter(is.na(score_numeric)) %>% 
+  View()
+```
+
+## X29way_logOdds
+
+```{r}
+scores %>% 
+  select(X29way_logOdds) %>% 
+  mutate(score_numeric = as.numeric(X29way_logOdds)) %>% 
+  filter(is.na(score_numeric)) %>% 
+  View()
+```
+
+NAs are not introduce by as.numeric()
+
+## Por transcript id
+
+```{r}
+scores %>% 
+  filter(!grepl("ENST00000269305",
+              Ensembl_transcriptid
+              )
+         ) %>% View()
+```
+
+```{r}
+data %>% 
+  select(cDNA_variant:VEST4_score) %>% 
+  filter_at(vars(SIFT_score:VEST4_score), 
+            any_vars(is.na(.))) %>% 
+  View()
+
+mutations %>% 
+  filter(cDNA_variant == "c.993+285G>C") %>% 
+  View()
+```
+### Sift
+
+```{r}
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Sift.Score,
+         SIFT_score) %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>% 
+  View()
+
+data %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>%
+  select(HG19_variant) %>% 
+  mutate(
+    chr = 17,
+    position_mutation=gsub("NC_000017.10:g.","",HG19_variant)
+    ) %>%
+  separate(col = position_mutation, 
+           into = c("position","mutation"),
+           sep = c(7)) %>% 
+  separate(col = mutation, 
+           into = c("ref","alt"),
+           sep = ">") %>% 
+  select(-HG19_variant) %>% 
+  write.table("0_RawData/sift/transcript_id_missings.csv",
+              sep = ",",
+              col.names = F,
+              row.names = F,
+              quote=F)
+```
+
+No se consiguen el transcript correspondiente
+
+http://provean.jcvi.org/genome_submit_2.php?species=human
+
+## Por Uniprot_acc
+
+```{r}
+scores %>% 
+  filter(!grepl("P04637",
+              Uniprot_acc
+              )
+         ) %>% View()
+```
+
+### Polyphen
+
+
+```{r}
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Uniprot_acc,
+         Polyphen2_HDIV_score,
+         Polyphen2_HVAR_score) %>% 
+  filter(is.na(Polyphen2_HDIV_score) | is.na(Polyphen2_HVAR_score)) %>% 
+  View()
+
+data %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>%
+  select(HG19_variant) %>% 
+  mutate(
+    chr = 17,
+    position_mutation=gsub("NC_000017.10:g.","",HG19_variant)
+    ) %>%
+  separate(col = position_mutation, 
+           into = c("position","mutation"),
+           sep = c(7)) %>% 
+  separate(col = mutation, 
+           into = c("ref","alt"),
+           sep = ">") %>% 
+  select(-HG19_variant) %>% 
+  write.table("0_RawData/sift/transcript_id_missings.csv",
+              sep = ",",
+              col.names = F,
+              row.names = F,
+              quote=F)
+```
+
+## Por Uniprot_entry
+
+```{r}
+scores %>% 
+  filter(!grepl("P53_HUMAN",
+              Uniprot_entry
+              )
+         ) %>% View()
+```
+
+### mutation assessor
+
+
+```{r}
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Uniprot_acc,
+         Uniprot_entry,
+         MutationAssessor_score,
+         Mutassessor_prediction.) %>% 
+  filter(is.na(MutationAssessor_score) | is.na(Mutassessor_prediction)) %>% 
+  View()
+
+data %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>%
+  select(HG19_variant) %>% 
+  mutate(
+    chr = 17,
+    position_mutation=gsub("NC_000017.10:g.","",HG19_variant)
+    ) %>%
+  separate(col = position_mutation, 
+           into = c("position","mutation"),
+           sep = c(7)) %>% 
+  separate(col = mutation, 
+           into = c("ref","alt"),
+           sep = ">") %>% 
+  select(-HG19_variant) %>% 
+  write.table("0_RawData/sift/transcript_id_missings.csv",
+              sep = ",",
+              col.names = F,
+              row.names = F,
+              quote=F)
+```
+
+```{r}
+scores %>% 
+  select(pos.1.coor.:aaalt, 
+         Uniprot_entry, 
+         Uniprot_acc,
+         Ensembl_transcriptid,
+         MutationAssessor_score) %>% 
+  filter(pos.1.coor.==7676194, 
+         ref=="C",
+         alt=="T") %>% View()
+```
+
+### LRT
+
+
+```{r}
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Uniprot_acc,
+         Uniprot_entry,
+         LRT_score) %>% 
+  filter(is.na(LRT_score)) %>% 
+  View()
+
+data %>% 
+  filter(is.na(Sift.Score) | is.na(SIFT_score)) %>%
+  select(HG19_variant) %>% 
+  mutate(
+    chr = 17,
+    position_mutation=gsub("NC_000017.10:g.","",HG19_variant)
+    ) %>%
+  separate(col = position_mutation, 
+           into = c("position","mutation"),
+           sep = c(7)) %>% 
+  separate(col = mutation, 
+           into = c("ref","alt"),
+           sep = ">") %>% 
+  select(-HG19_variant) %>% 
+  write.table("0_RawData/sift/transcript_id_missings.csv",
+              sep = ",",
+              col.names = F,
+              row.names = F,
+              quote=F)
+```
+
+```{r}
+scores %>% 
+  select(pos.1.coor.:aaalt, 
+         Uniprot_entry, 
+         Uniprot_acc,
+         Ensembl_transcriptid,
+         MutationAssessor_score) %>% 
+  filter(pos.1.coor.==7676194, 
+         ref=="C",
+         alt=="T") %>% View()
+```
+
+### MutPred_score
+
+
+```{r}
+data %>% 
+  select(cDNA_variant:HG38_variant, 
+         Ensembl_transcriptid,
+         Uniprot_acc,
+         Uniprot_entry,
+         MutPred_score) %>% 
+  filter(is.na(MutPred_score)) %>% 
+  View()
+
+
+```
+
+
+# Export data
+
+```{r}
+data %>% 
+  select(-(Sift.Score:Confident__Hypotheses)) %>% 
+  saveRDS("1_processed_data/data.rds")
+```
+
