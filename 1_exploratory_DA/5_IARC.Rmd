@@ -1,0 +1,312 @@
+---
+title: "PREDICCIÓN DE LA PATOGENICIDAD DE LAS MUTACIONES MISSENSE DEL GEN TP53"
+subtitle: "Análisis descriptivo"
+author: | 
+  | Peter Olejua
+  | Maestría en Bioestadística
+  | Departamento de Epidemiología Clínica y Bioestadística
+  | olejua.peter@javeriana.edu.co
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    code_folding: hide
+    css: two_columns.css
+    df_print: kable
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+---
+
+<style>
+    body .main-container {
+        max-width: 1800px;
+    }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache = F,
+	message = FALSE,
+	warning = FALSE
+	# out.width = "150%"
+)
+# options(width = 200)
+# theme_set(theme_minimal())  + theme(text=element_text(family="Palatino", size=20)))
+```
+
+# Librerías
+
+```{r}
+library(knitr)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(splitstackshape)
+library(reshape2)
+library(ggplot2)
+library(GGally)
+library(papeR)
+library(corrplot)
+```
+
+
+# Load the data
+
+```{r}
+mutations <- read.delim("../0_get_data/0_RawData/UMD/UMD_mutations_US.tsv", stringsAsFactors=FALSE)
+misMut <- filter(mutations, startsWith(Variant_Classification,"Missense") & Variant_Type=="SNP")
+
+data <- readRDS("../0_get_data/1_processed_data/data.rds")
+
+# glimpse(data)
+# IARC
+
+iarc_germline <- read.delim("../3_random forest/IARC/germinales/datasets/germlineMutationDataIARC TP53 Database, R19.txt")
+
+iarc_somatic <- read.delim("../3_random forest/IARC/somaticas/datasets/somaticMutationDataIARC TP53 Database, R19.txt")
+```
+
+# UMD missense mutations
+
+```{r}
+dim(misMut)
+table(misMut$Pathogenicity)
+```
+
+
+
+
+# Resumen de variantes únicas
+
+```{r}
+data %>% 
+  select(SIFT_score:bStatistic) %>% 
+  dim()
+```
+
+
+```{r }
+data %>% 
+  select(SIFT_score:REVEL_score) %>% 
+  data.frame() %>% 
+  summarize() %>% 
+  kable()
+```
+
+## Por patogenicidad
+
+```{r}
+data %>% 
+  select(Pathogenicity) %>% 
+  mutate(Pathogenicity = ordered(x = Pathogenicity, 
+                                 levels=c("Benign",
+                                          "Possibly pathogenic",
+                                          "Likely Pathogenic",
+                                          "Pathogenic",
+                                          "VUS")
+                                 )) %>% 
+  data.frame() %>% 
+  summarize(type = "fac") %>% 
+  kable()
+```
+
+```{r}
+data %>% 
+  select(SIFT_score:Pathogenicity) %>% 
+  mutate(Pathogenicity = ordered(x = Pathogenicity, 
+                                 levels=c("Benign",
+                                          "Possibly pathogenic",
+                                          "Likely Pathogenic",
+                                          "Pathogenic",
+                                          "VUS"),
+                                 labels=(c("Ben","Pos","Lik","Pat","VUS"))
+                                 )) %>% 
+  data.frame() %>% 
+  summarize(group = "Pathogenicity", test=F) %>% 
+  kable(row.names = F)
+```
+
+
+
+
+```{r}
+data %>% 
+  select(SIFT_score:bStatistic) %>% 
+  ncol()
+```
+
+
+```{r}
+data %>% 
+  mutate(Pathogenicity = ordered(x = Pathogenicity, 
+                                 levels=c("Benign",
+                                          "Possibly pathogenic",
+                                          "Likely Pathogenic",
+                                          "Pathogenic",
+                                          "VUS"),
+                                 labels=(c("Ben","Pos","Lik","Pat","VUS"))
+                                 )) %>% 
+  ggplot(aes(Pathogenicity, REVEL_score,fill=Pathogenicity))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("green", "yellow", "orange", "red", "gray"))+
+  geom_hline(yintercept = 0.5, colour="red") 
+```
+
+```{r fig.height=18, fig.width=12}
+data %>% 
+  select(cDNA_variant, SIFT_score:bStatistic,Pathogenicity) %>% 
+  gather(variable, score, SIFT_score:bStatistic) %>% 
+  mutate(Pathogenicity = ordered(x = Pathogenicity, 
+                                 levels=c("Benign",
+                                          "Possibly pathogenic",
+                                          "Likely Pathogenic",
+                                          "Pathogenic",
+                                          "VUS"),
+                                 labels=(c("Ben","Pos","Lik","Pat","VUS"))
+                                 )) %>% 
+  ggplot(aes(Pathogenicity, score, fill=Pathogenicity))+
+  facet_wrap(. ~ variable, scales = "free", ncol = 5)+
+  geom_boxplot()+
+  scale_fill_manual(values=c("green", "yellow", "orange", "red", "gray"))
+```
+
+# Casos completos
+
+```{r}
+data %>% 
+  select(SIFT_score:bStatistic) %>% 
+  drop_na(SIFT_score:bStatistic) %>% 
+  dim()
+```
+
+```{r}
+data %>% 
+  select(SIFT_score:Pathogenicity) %>% 
+  drop_na(SIFT_score:bStatistic) %>% 
+  mutate(Pathogenicity = ordered(x = Pathogenicity, 
+                                 levels=c("Benign",
+                                          "Possibly pathogenic",
+                                          "Likely Pathogenic",
+                                          "Pathogenic",
+                                          "VUS")
+                                 )) %>% 
+  data.frame() %>% 
+  summarize(type = "fac") %>% 
+  kable()
+```
+
+
+
+
+# Correlación
+
+
+```{r fig.height=18, fig.width=12}
+data %>% 
+  select(SIFT_score:bStatistic) %>% 
+  cor(use = "pairwise") -> M
+
+colnames(M) <- abbreviate(colnames(M),minlength = 10)
+rownames(M) <- abbreviate(rownames(M),minlength = 10)
+  
+corrplot(M,method="number")
+```
+
+```{r fig.height=10, fig.width=12}
+dissimilarity <- 1 - abs(M)
+distance <- as.dist(dissimilarity)
+
+plot(hclust(distance), method = "single",
+     main="Dissimilarity = 1 - |Correlation|", xlab="")
+```
+
+
+# Vs IARC
+
+## Mutaciones germinales
+
+```{r}
+table(iarc_germline$Effect)
+```
+
+Hay un total de missense únicas:
+
+```{r}
+iarc_germline %>% 
+  filter(Effect == "missense") %>%
+  pull(g_description_GRCh38) %>% 
+  unique() %>% 
+  length()
+```
+
+## Mutaciones somáticas
+
+```{r}
+table(iarc_somatic$Effect)
+```
+
+Hay un total de missense únicas:
+
+```{r}
+iarc_somatic %>% 
+  filter(Effect == "missense") %>% 
+  select(
+    c_description,
+    WT_nucleotide,
+    Mutant_nucleotide
+    ) %>% 
+  unique() %>% 
+  nrow()
+```
+
+
+```{r include=F}
+data %>% 
+  pull(cDNA_variant) %>% 
+  unique() %>% 
+  length()
+```
+
+```{r}
+iarc_germline %>% 
+  filter(Effect == "missense") %>% 
+  select(
+    g_description, 
+    TransactivationClass,
+    WT_nucleotide,
+    Mutant_nucleotide
+    ) -> iarc_germ_missense
+
+iarc_somatic %>% 
+  filter(Effect == "missense") %>% 
+  select(
+    g_description, 
+    TransactivationClass,
+    WT_nucleotide,
+    Mutant_nucleotide
+    ) -> iarc_som_missense
+```
+
+```{r}
+data %>% 
+  select(
+    HG19_variant,
+    Pathogenicity,
+    aaref,
+    aaalt
+  ) %>% 
+  mutate(
+    HG19_variant = gsub("NC_000017.10:","",HG19_variant)
+  ) %>% 
+  full_join(
+    iarc_germ_missense,
+    by = c(
+      "HG19_variant" = "g_description",
+      "aaref" = "WT_nucleotide",
+      "aaalt" = "Mutant_nucleotide"
+      )
+  ) -> df
+```
+
